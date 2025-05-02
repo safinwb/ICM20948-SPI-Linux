@@ -1,4 +1,7 @@
 #include "ins.h"
+#include "AHRSAlgorithms.h"
+#include <chrono>
+#include <iomanip>
 
 // === SPI settings ===
 uint8_t mode = SPI_MODE_0;
@@ -97,7 +100,7 @@ static uint8_t readMagRegister(uint8_t reg)
     writeICM(B3, B3_I2C_SLV0_CTRL, 0x81);                  // Enable, 1 byte
 
     // Wait for the ICM to complete I2C transaction
-    delay(50); // Wait longer than before (was 10ms before)
+    delay(10); // Wait longer than before (was 10ms before)
 
     // Now read the fetched data
     return readICM(B0, B0_EXT_SLV_SENS_DATA_00);
@@ -173,14 +176,21 @@ void initICM20948()
     // I want to reset the ICM to clear anything and verything
     //  Trigger full device reset (bit 7 of PWR_MGMT_1)
     writeICM(B0, B0_PWR_MGMT_1, 0x80);
-    delay(100); // Wait for reboot
+    delay(1000); // Wait for reboot
+
+    while (readICM(B0, B0_PWR_MGMT_1) & 0x80)
+    {
+        delay(10); // Wait until reset bit clears
+    }
+
+    std::cout << "ICM Reset Done" << std::endl;
 
     whoamiICM();
     // Where the fuck are all them functions ????
 
     // Reset Device
-    //  writeICM(B0, B0_PWR_MGMT_1, 0x80 | 0x41);
-    //  delay(100);
+    writeICM(B0, B0_PWR_MGMT_1, 0x80 | 0x41);
+    delay(100);
 
     // Select Clock Source
     uint8_t new_val = readICM(B0, B0_PWR_MGMT_1);
@@ -230,8 +240,9 @@ void initICM20948()
     delay(100);
 }
 
-void initMAG()
+void enableI2C()
 {
+
     // Reset I2C Master
     uint8_t new_val = readICM(B0, B0_USER_CTRL);
     new_val |= 0x02;
@@ -242,22 +253,40 @@ void initMAG()
     new_val |= 0x20;
     writeICM(B0, B0_USER_CTRL, new_val);
 
-    delay(100);
-
     // Set I2C Master Clock Frequency (400 kHz)
     new_val = readICM(B3, B3_I2C_MST_CTRL);
     new_val |= 0x07;
     writeICM(B3, B3_I2C_MST_CTRL, new_val);
 
+}
+
+// Please have a look at this: https://devzone.nordicsemi.com/f/nordic-q-a/61234/icm20948-magnetometer-issue
+
+void initMAG()
+{
+
+    enableI2C();
     resetMag();
 
-    // See who am i
-    uint8_t ak09916_id = readMagRegister(MAG_WIA2);
+    // Keep checking until the correct magnetometer ID is found
+    uint8_t ak09916_id = 0;
 
-    if (ak09916_id == AK09916_ID)
-        std::cout << "🥰 MAG Found :D" << std::endl;
-    else
-        std::cout << "🥲 MAG not Found :(" << std::endl;
+    while (ak09916_id != AK09916_ID)
+    {
+        ak09916_id = readMagRegister(MAG_WIA2);
+
+        if (ak09916_id == AK09916_ID)
+        {
+            std::cout << "🥰 MAG Found :D" << std::endl;
+        }
+        else
+        {
+            std::cout << "🥲 MAG not Found :( Retrying..." << std::endl;
+            resetMag();
+            enableI2C();
+            delay(10); // Optional: small delay to avoid busy looping
+        }
+    }
 
     // Set ODR
     writeICM(B0, LP_CONFIG, 0x40);
@@ -280,7 +309,6 @@ void initMAG()
     readMagRegister(MAG_HXL, 8);
     delay(10);
 
-    delay(1000);
 }
 
 void calibrateGyro()
@@ -321,7 +349,7 @@ void calibrateGyro()
     writeICM(B2, B2_ZG_OFFS_USRH, (uint8_t)(z_gyro_bias >> 8));
     writeICM(B2, B2_ZG_OFFS_USRL, (uint8_t)(z_gyro_bias));
 
-    std::cout << "Calibration Done" << std::endl;
+    std::cout << " 🚲 Gyro Calibration Done" << std::endl;
 }
 
 void resetGyroBias()
@@ -334,7 +362,6 @@ void resetGyroBias()
     writeICM(B2, B2_ZG_OFFS_USRH, 0x00);
     writeICM(B2, B2_ZG_OFFS_USRL, 0x00);
 
-    std::cout << "Gyro bias registers reset to 0!" << std::endl;
     delay(100);
 }
 
@@ -358,14 +385,52 @@ int main()
     float mx, my, mz;
     float ax, ay, az, gx, gy, gz;
 
+    static auto lastUpdate = std::chrono::high_resolution_clock::now();
+    auto now = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<float> delta = now - lastUpdate;
+    lastUpdate = now;
+
     while (true)
     {
         getMag(mx, my, mz);
         getIMU(ax, ay, az, gx, gy, gz);
 
-        std::cout << "Accel (g): X=" << ax << " Y=" << ay << " Z=" << az << std::endl;
-        std::cout << "Gyro (dps): X=" << gx << " Y=" << gy << " Z=" << gz << std::endl;
-        std::cout << "MAG: X=" << mx << " Y=" << my << " Z=" << mz << std::endl;
+        now = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<float> delta = now - lastUpdate;
+        lastUpdate = now;
+
+        MahonyQuaternionUpdate(ax, ay, az, gx * DEG_TO_RAD,
+                               gy * DEG_TO_RAD, gz * DEG_TO_RAD, my,
+                               mx, mz, delta.count());
+
+        // std::cout << "TIME IN SECONDS: " << delta.count() << std::endl;
+        // std::cout << "Accel (g): X=" << ax << " Y=" << ay << " Z=" << az << std::endl;
+        // std::cout << "Gyro (dps): X=" << gx << " Y=" << gy << " Z=" << gz << std::endl;
+        // std::cout << "MAG: X=" << mx << " Y=" << my << " Z=" << mz << std::endl;
+        // std::cout << "---------------------------" << std::endl;
+        // std::cout << "MAHONY: Q0=" << *getQ() << " QX=" << *getQ() + 1 << " QY=" << *getQ() + 2 << " QZ=" << *getQ() + 3 << std::endl;
+        // std::cout << "---------------------------" << std::endl;
+
+        float yaw, pitch, roll;
+        yaw = atan2(2.0f * (*(getQ() + 1) * *(getQ() + 2) + *getQ() * *(getQ() + 3)), *getQ() * *getQ() + *(getQ() + 1) * *(getQ() + 1) - *(getQ() + 2) * *(getQ() + 2) - *(getQ() + 3) * *(getQ() + 3));
+
+        pitch = -asin(2.0f * (*(getQ() + 1) * *(getQ() + 3) - *getQ() * *(getQ() + 2)));
+
+        roll = atan2(2.0f * (*getQ() * *(getQ() + 1) + *(getQ() + 2) * *(getQ() + 3)), *getQ() * *getQ() - *(getQ() + 1) * *(getQ() + 1) - *(getQ() + 2) * *(getQ() + 2) + *(getQ() + 3) * *(getQ() + 3));
+
+        pitch *= RAD_TO_DEG;
+        yaw *= RAD_TO_DEG;
+
+        // Declination of SparkFun Electronics (40°05'26.6"N 105°11'05.9"W) is
+        // 	8° 30' E  ± 0° 21' (or 8.5°) on 2016-07-19
+        // - http://www.ngdc.noaa.gov/geomag-web/#declination
+        yaw -= 2.8;
+        roll *= RAD_TO_DEG;
+
+        std::cout << std::fixed;
+        std::cout << std::setprecision(2);
+        std::cout << "---------------------------" << std::endl;
+        std::cout << "DETLA:" << delta.count() << ", YAW=" << yaw << " PITCH=" << pitch << " ROLL=" << roll << std::endl;
         std::cout << "---------------------------" << std::endl;
 
         delay(100);
