@@ -6,15 +6,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef enum
+{
+    _250dps,
+    _500dps,
+    _1000dps,
+    _2000dps
+} gyro_full_scale;
+
+typedef enum
+{
+    _2g,
+    _4g,
+    _8g,
+    _16g
+} accel_full_scale;
+
 // === SPI settings ===
 uint8_t mode = SPI_MODE_0;
 uint8_t bits = 8;
-uint32_t speed = 1000000; // 1 MHz
+uint32_t speed = 7000000; // 7 MHz
 int spi_fd;
 
 int MAG_X_BIAS = 69;  // mGuass
 int MAG_Y_BIAS = -4;  // mGuass
 int MAG_Z_BIAS = 287; // mGuass
+
+static float gyro_scale_factor;
+static float accel_scale_factor;
 
 // Erm Helpers
 void printHex(int var)
@@ -64,12 +83,12 @@ uint8_t _readRegister(uint8_t reg)
     return rx[1];
 }
 
-//Raw Read from Registers
-void _readRegisters(uint8_t startReg, uint8_t* buffer, size_t length)
+// Raw Read from Registers
+void _readRegisters(uint8_t startReg, uint8_t *buffer, size_t length)
 {
     uint8_t tx[length + 1];
     uint8_t rx[length + 1];
-    tx[0] = startReg | 0x80; // MSB=1 for read
+    tx[0] = startReg | 0x80;   // MSB=1 for read
     memset(&tx[1], 0, length); // Dummy bytes to receive data
 
     struct spi_ioc_transfer tr = {
@@ -186,13 +205,13 @@ void getIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz)
     int16_t rawGy = (int16_t)((buffer[8] << 8) | buffer[9]);
     int16_t rawGz = (int16_t)((buffer[10] << 8) | buffer[11]);
 
-    ax = rawAx / 2048.0f; // assuming ±16g range
-    ay = rawAy / 2048.0f;
-    az = rawAz / 2048.0f;
+    ax = rawAx / accel_scale_factor;
+    ay = rawAy / accel_scale_factor;
+    az = rawAz / accel_scale_factor;
 
-    gx = rawGx / 16.4f; // assuming ±2000 dps
-    gy = rawGy / 16.4f;
-    gz = rawGz / 16.4f;
+    gx = rawGx / gyro_scale_factor;
+    gy = rawGy / gyro_scale_factor;
+    gz = rawGz / gyro_scale_factor;
 }
 
 void whoamiICM()
@@ -213,6 +232,10 @@ void whoamiICM()
 // === Sensor init and read ===
 void initICM20948()
 {
+
+    // ICM Settings
+    gyro_full_scale gy_fvalue = _250dps;
+    accel_full_scale acc_fvalue = _2g;
 
     // I want to reset the ICM to clear anything and verything
     //  Trigger full device reset (bit 7 of PWR_MGMT_1)
@@ -264,14 +287,54 @@ void initICM20948()
     resetGyroBias();
     calibrateGyro();
 
-    // Set Gyro Scale, I want max i.e 2000dps
+    // Set Gyro Scale
     new_val = readICM(B2, B2_GYRO_CONFIG_1);
-    new_val |= 0x06;
+
+    switch (gy_fvalue)
+    {
+    case _250dps:
+        new_val |= 0x00;
+        gyro_scale_factor = 131.0;
+        break;
+    case _500dps:
+        new_val |= 0x02;
+        gyro_scale_factor = 65.5;
+        break;
+    case _1000dps:
+        new_val |= 0x04;
+        gyro_scale_factor = 32.8;
+        break;
+    case _2000dps:
+        new_val |= 0x06;
+        gyro_scale_factor = 16.4;
+        break;
+    }
+
     writeICM(B2, B2_GYRO_CONFIG_1, new_val);
 
-    // Set Acc Scale, I want max i.e
+    // Set Acc Scale.
     new_val = readICM(B2, B2_ACCEL_CONFIG);
-    new_val |= 0x06;
+
+    switch (acc_fvalue)
+    {
+    case _2g:
+        new_val |= 0x00;
+        accel_scale_factor = 16384;
+        break;
+    case _4g:
+        new_val |= 0x02;
+        accel_scale_factor = 8192;
+        break;
+    case _8g:
+        new_val |= 0x04;
+        accel_scale_factor = 4096;
+        break;
+    case _16g:
+        new_val |= 0x06;
+        accel_scale_factor = 2048;
+        break;
+    }
+
     writeICM(B2, B2_ACCEL_CONFIG, new_val);
 
     // Wakeup ICM
@@ -298,7 +361,6 @@ void enableI2C()
     new_val = readICM(B3, B3_I2C_MST_CTRL);
     new_val |= 0x07;
     writeICM(B3, B3_I2C_MST_CTRL, new_val);
-
 }
 
 // Please have a look at this: https://devzone.nordicsemi.com/f/nordic-q-a/61234/icm20948-magnetometer-issue
@@ -349,7 +411,6 @@ void initMAG()
     // Once you start, it will become continuous
     readMagRegister(MAG_HXL, 8);
     delay(10);
-
 }
 
 void calibrateGyro()
@@ -404,6 +465,11 @@ void resetGyroBias()
     writeICM(B2, B2_ZG_OFFS_USRL, 0x00);
 
     delay(100);
+}
+
+void calibrateACC()
+{
+    //Populate this pls
 }
 
 // === Main loop ===
