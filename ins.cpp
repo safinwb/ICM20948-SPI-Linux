@@ -2,6 +2,9 @@
 #include "AHRSAlgorithms.h"
 #include <chrono>
 #include <iomanip>
+#include <thread> // for sleep
+#include <stdlib.h>
+#include <string.h>
 
 // === SPI settings ===
 uint8_t mode = SPI_MODE_0;
@@ -22,6 +25,11 @@ void printHex(int var)
 void delay(int ms)
 {
     usleep(ms * 1000);
+}
+
+void sleep(int ms)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
 // === SPI helper functions ===
@@ -54,6 +62,25 @@ uint8_t _readRegister(uint8_t reg)
     };
     ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
     return rx[1];
+}
+
+//Raw Read from Registers
+void _readRegisters(uint8_t startReg, uint8_t* buffer, size_t length)
+{
+    uint8_t tx[length + 1];
+    uint8_t rx[length + 1];
+    tx[0] = startReg | 0x80; // MSB=1 for read
+    memset(&tx[1], 0, length); // Dummy bytes to receive data
+
+    struct spi_ioc_transfer tr = {
+        .tx_buf = (unsigned long)tx,
+        .rx_buf = (unsigned long)rx,
+        .len = length + 1,
+        .speed_hz = speed,
+        .bits_per_word = bits,
+    };
+    ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
+    memcpy(buffer, &rx[1], length); // skip the first dummy byte
 }
 
 // Select Bank directly
@@ -133,11 +160,14 @@ void resetMag()
 
 void getMag(float &mx, float &my, float &mz)
 {
-    int16_t rawX = ((int16_t)readICM(B0, B0_EXT_SLV_SENS_DATA_01) << 8) | readICM(B0, B0_EXT_SLV_SENS_DATA_00);
-    int16_t rawY = ((int16_t)readICM(B0, B0_EXT_SLV_SENS_DATA_03) << 8) | readICM(B0, B0_EXT_SLV_SENS_DATA_02);
-    int16_t rawZ = ((int16_t)readICM(B0, B0_EXT_SLV_SENS_DATA_05) << 8) | readICM(B0, B0_EXT_SLV_SENS_DATA_04);
+    uint8_t buffer[6];
+    selectBank(B0);
+    _readRegisters(B0_EXT_SLV_SENS_DATA_00, buffer, 6);
 
-    // Convert to microtesla (0.15 uT/LSB for AK09916)
+    int16_t rawX = ((int16_t)buffer[1] << 8) | buffer[0];
+    int16_t rawY = ((int16_t)buffer[3] << 8) | buffer[2];
+    int16_t rawZ = ((int16_t)buffer[5] << 8) | buffer[4];
+
     mx = (rawX - MAG_X_BIAS) * 0.15f;
     my = (rawY - MAG_Y_BIAS) * 0.15f;
     mz = (rawZ - MAG_Z_BIAS) * 0.15f;
@@ -145,13 +175,24 @@ void getMag(float &mx, float &my, float &mz)
 
 void getIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz)
 {
-    ax = read16(ACCEL_XOUT_H) / 2048.0f;
-    ay = read16(ACCEL_YOUT_H) / 2048.0f;
-    az = read16(ACCEL_ZOUT_H) / 2048.0f;
+    uint8_t buffer[12];
+    selectBank(B0);
+    _readRegisters(ACCEL_XOUT_H, buffer, 12);
 
-    gx = read16(GYRO_XOUT_H) / 16.4f;
-    gy = read16(GYRO_YOUT_H) / 16.4f;
-    gz = read16(GYRO_ZOUT_H) / 16.4f;
+    int16_t rawAx = (int16_t)((buffer[0] << 8) | buffer[1]);
+    int16_t rawAy = (int16_t)((buffer[2] << 8) | buffer[3]);
+    int16_t rawAz = (int16_t)((buffer[4] << 8) | buffer[5]);
+    int16_t rawGx = (int16_t)((buffer[6] << 8) | buffer[7]);
+    int16_t rawGy = (int16_t)((buffer[8] << 8) | buffer[9]);
+    int16_t rawGz = (int16_t)((buffer[10] << 8) | buffer[11]);
+
+    ax = rawAx / 2048.0f; // assuming ±16g range
+    ay = rawAy / 2048.0f;
+    az = rawAz / 2048.0f;
+
+    gx = rawGx / 16.4f; // assuming ±2000 dps
+    gy = rawGy / 16.4f;
+    gz = rawGz / 16.4f;
 }
 
 void whoamiICM()
@@ -433,7 +474,7 @@ int main()
         std::cout << "DETLA:" << delta.count() << ", YAW=" << yaw << " PITCH=" << pitch << " ROLL=" << roll << std::endl;
         std::cout << "---------------------------" << std::endl;
 
-        delay(100);
+        sleep(10);
     }
 
     close(spi_fd);
